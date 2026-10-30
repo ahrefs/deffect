@@ -1,0 +1,4 @@
+(executable
+ (public_name deffect)
+ (name main)
+ (libraries deffect))

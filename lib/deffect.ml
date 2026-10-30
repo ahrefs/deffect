@@ -1,3 +1,13 @@
+(*
+  issue: effects carry the value with them: good for consuming/traversing existing value, useless for e.g. random gen a value, useless for consuming two values for e.g. comparison
+  - need to double the effects? one for consuming, one for producing? also one for consuming two? three? do we sometimes need both consume and produce?
+
+  issue: effects have to return a given type but we sometimes want to serialise to a string, sometimes hash into a int64, sometimes compare values, etc. so we need different return types
+  - need to have effects per generic function we want? Compare effect and Print effect and Sample effect?
+
+ *)
+
+
 
 module Meta : sig
   type 'a t = 'a -> unit
@@ -19,6 +29,7 @@ type _ Effect.t += Int32 : int32 -> unit Effect.t
 type _ Effect.t += Int64 : int64 -> unit Effect.t
 type _ Effect.t += Nativeint : nativeint -> unit Effect.t
 type _ Effect.t += Float : float -> unit Effect.t
+type _ Effect.t += String : string -> unit Effect.t
 
 let performance_scalar
 : type a. a Typegist.Type.Gist.Scalar.t -> a -> unit
@@ -37,24 +48,24 @@ let performance_scalar
 type collectionKind = Tuple | Record | Collection of string
 
 type _ Effect.t += ColStart : collectionKind -> unit Effect.t
-type _ Effect.t += ColElt : collectionKind * Typegist.Type.Gist.Field.name -> unit Effect.t
+type _ Effect.t += ColElt : collectionKind * Typegist.Type.Gist.Field.name * int -> unit Effect.t
 type _ Effect.t += ColEnd : collectionKind -> unit Effect.t
 
 let rec performance_fields
-: type p v. collectionKind -> (p, v) Typegist.Type.Gist.Product.fields -> p -> unit
-= fun ck fields v ->
+: type p v. collectionKind -> int -> (p, v) Typegist.Type.Gist.Product.fields -> p -> unit
+= fun ck idx fields v ->
   match fields with
   | Ctor _ -> ()
   | App (fields, field) ->
-      Effect.perform (ColElt (ck, Typegist.Type.Gist.Field.name field));
+      Effect.perform (ColElt (ck, Typegist.Type.Gist.Field.name field, idx));
       performance (Typegist.Type.Gist.Field.gist field) (Typegist.Type.Gist.Field.get field v);
-      performance_fields ck fields v
+      performance_fields ck (idx+1) fields v
 
 and performance_product
 : type a. collectionKind -> a Typegist.Type.Gist.Product.t -> a -> unit
 = fun ck p v ->
   Effect.perform (ColStart ck);
-  performance_fields ck p v;
+  performance_fields ck 0 p v;
   Effect.perform (ColEnd ck)
 
 and performance_tuple
@@ -79,6 +90,7 @@ and performance
     | Tuple p -> performance_tuple p v
     | Record r -> performance_record r v
     | Variant_like _ -> failwith "TDOD"
+    | Array_like (String _) -> Effect.perform (String v)
     | Array_like _ -> failwith "TDOD"
     | Map_like _ -> failwith "TDOD"
     | Cell_like _ -> failwith "TDOD"
@@ -102,7 +114,7 @@ end
           (module Meta)
           (fun s ->
             Effect.perform (ColStart (Collection "StringSet"));
-            iter (fun e -> Effect.perform (ColElt (Collection "StringSet", e))) s;
+            Seq.iteri (fun idx e -> Effect.perform (ColElt (Collection "StringSet", e, idx))) (to_seq s);
             Effect.perform (ColEnd (Collection "StringSet")))
           meta
       in
@@ -129,3 +141,25 @@ end
       in
       Typegist.Type.Gist.update ~meta base
 end
+
+let print g v =
+  let b = Buffer.create 64 in
+  let rec loop () =
+    match performance g v with
+    | () -> Buffer.contents b
+    | effect Bool true, k -> Buffer.add_string b "true"; Effect.Deep.continue k ()
+    | effect Bool false, k -> Buffer.add_string b "true"; Effect.Deep.continue k ()
+    | effect String s, k -> Buffer.add_string b (Printf.sprintf "%S" s); Effect.Deep.continue k ()
+    | effect ColStart Tuple, k -> Buffer.add_string b "["; Effect.Deep.continue k ()
+    | effect ColElt (Tuple, "", n), k -> if n <> 0 then Buffer.add_string b ","; Effect.Deep.continue k ()
+    | effect ColEnd Tuple, k -> Buffer.add_string b "]"; Effect.Deep.continue k ()
+    | effect ColStart Record, k -> Buffer.add_string b "{"; Effect.Deep.continue k ()
+    | effect ColElt (Record, n, i), k ->
+        if i <> 0 then Buffer.add_string b ",";
+        Buffer.add_string b (Printf.sprintf "%S" n);
+        Buffer.add_char b '=';
+        Effect.Deep.continue k ()
+    | effect ColEnd Record, k -> Buffer.add_string b "}"; Effect.Deep.continue k ()
+  in
+  loop ()
+
